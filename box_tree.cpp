@@ -169,8 +169,10 @@ int main(int argc, char **argv)
     args.byteSize = sizeof(args);
     args.buildQuality = RTC_BUILD_QUALITY_HIGH;
     args.buildFlags = RTC_BUILD_FLAG_NONE;
+    args.minLeafSize = 500;
+    args.maxLeafSize = 5000;
     args.maxBranchingFactor = 2;
-    args.intersectionCost = 0.5f;
+    args.intersectionCost = 0.1f;
     args.bvh = bvh;
     args.primitives = boxes.data();
     args.primitiveCount = boxes.size();
@@ -219,6 +221,8 @@ int main(int argc, char **argv)
                     glm::vec3(prim.upper_x, prim.upper_y, prim.upper_z));
             bounds.extend(b);
         }
+        std::cout << "Leaf[" << i << "] has " << leaves[i]->n_prims << " prims\n"
+                  << "bounds: " << bounds << "\n";
         leaf_bounds.push_back(bounds);
     }
 
@@ -232,10 +236,8 @@ int main(int argc, char **argv)
                 box3f inters = intersection(leaf_bounds[i], leaf_bounds[j]);
                 std::cout << "Leaf " << i << " overlaps " << j << "\n"
                           << "Leaf[" << i << "] bounds = " << leaf_bounds[i] << "\nLeaf[" << j
-                          << "] bounds = " << leaf_bounds[j]
-                          << "\nIntersection: " << inters
-                          << "\nVolume: " << inters.volume()
-                          << "\n";
+                          << "] bounds = " << leaf_bounds[j] << "\nIntersection: " << inters
+                          << "\nVolume: " << inters.volume() << "\n";
                 had_overlap = true;
             }
         }
