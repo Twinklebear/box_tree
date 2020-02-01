@@ -25,6 +25,9 @@ struct box3f {
     float volume()
     {
         glm::vec3 diag = upper - lower;
+        if (glm::any(glm::lessThan(diag, glm::vec3(0.f)))) {
+            return 0.f;
+        }
         return diag.x * diag.y * diag.z;
     }
 };
@@ -217,7 +220,6 @@ int main(int argc, char **argv)
             bounds.extend(b);
         }
         leaf_bounds.push_back(bounds);
-        std::cout << "Leaves[" << i << "] bounds: " << bounds << "\n";
     }
 
     bool had_overlap = false;
