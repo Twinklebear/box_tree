@@ -195,8 +195,8 @@ int main(int argc, char **argv)
     args.byteSize = sizeof(args);
     args.buildQuality = RTC_BUILD_QUALITY_HIGH;
     args.buildFlags = RTC_BUILD_FLAG_NONE;
-    args.minLeafSize = 10000000;
-    args.maxLeafSize = 50000000;
+    args.minLeafSize = 100000;
+    args.maxLeafSize = 500000;
     args.maxBranchingFactor = 2;
     args.intersectionCost = 0.1f;
     args.bvh = bvh;
@@ -235,24 +235,43 @@ int main(int argc, char **argv)
         }
     }
 
-    std::vector<box3f> leaf_bounds;
     std::vector<LeafNode *> leaves;
     collect_leaves(root, leaves);
     std::cout << "Tree has " << leaves.size() << " leaves\n";
-    for (size_t i = 0; i < leaves.size(); ++i) {
+
+    std::vector<box3f> leaf_bounds(leaves.size(), box3f{});
+    std::atomic<size_t> num_tiled(0);
+    std::atomic<size_t> leaf_prims(0);
+    tbb::parallel_for(size_t(0), leaves.size(), [&](const size_t i) {
         box3f bounds;
+        float primitive_volume = 0.f;
         for (size_t j = 0; j < leaves[i]->n_prims; ++j) {
             const RTCBuildPrimitive &prim = leaves[i]->primitives[j];
             box3f b(glm::vec3(prim.lower_x, prim.lower_y, prim.lower_z),
                     glm::vec3(prim.upper_x, prim.upper_y, prim.upper_z));
+            primitive_volume += b.volume();
             bounds.extend(b);
         }
-        /*
-        std::cout << "Leaf[" << i << "] has " << leaves[i]->n_prims << " prims\n"
-                  << "bounds: " << bounds << "\n";
-                  */
-        leaf_bounds.push_back(bounds);
-    }
+        leaf_prims += leaves[i]->n_prims;
+        float leaf_volume = bounds.volume();
+        if (primitive_volume == leaf_volume) {
+            ++num_tiled;
+        }
+#if 0
+        else {
+            std::cout << "Leaf[" << i << "] is not tiled\n"
+                      << "# prims: " << leaves[i]->n_prims << "\n"
+                      << "bounds: " << bounds << "\n"
+                      << "volume: " << leaf_volume << "\n"
+                      << "prim volume: " << primitive_volume << "\n";
+        }
+#endif
+        leaf_bounds[i] = bounds;
+    });
+    std::cout << "Tiled leaves: "
+              << static_cast<float>(num_tiled.load()) / leaves.size() * 100.f << "%\n"
+              << "Avg. prims/leaf: " << static_cast<float>(leaf_prims.load()) / leaves.size()
+              << "\n";
 
     std::atomic<bool> had_overlap(false);
     tbb::parallel_for(size_t(0), leaf_bounds.size(), [&](const size_t i) {
