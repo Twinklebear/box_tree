@@ -1,10 +1,17 @@
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <iostream>
 #include <limits>
 #include <vector>
 #include <embree3/rtcore.h>
+#include <fcntl.h>
 #include <pmmintrin.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <tbb/parallel_for.h>
+#include <unistd.h>
 #include <xmmintrin.h>
 #include <glm/ext.hpp>
 #include <glm/glm.hpp>
@@ -30,6 +37,11 @@ struct box3f {
         }
         return diag.x * diag.y * diag.z;
     }
+};
+
+struct Hexahedron {
+    glm::ivec3 coord;
+    int level;
 };
 
 box3f intersection(const box3f &a, const box3f &b)
@@ -133,35 +145,49 @@ glm::uvec3 compute_grid(uint32_t num);
 
 int main(int argc, char **argv)
 {
-    if (argc != 2) {
-        std::cout << "Usage: ./box_tree <num boxes>\n";
+    if (argc != 3) {
+        std::cout << "Usage: ./box_tree <hexas.bin> <level>\n";
         return 1;
     }
+    const int level = std::atoi(argv[2]);
 
     _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
     _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
 
-    RTCDevice device = rtcNewDevice(nullptr);
+    int fd = open(argv[1], O_RDONLY);
+    struct stat stat_buf = {};
+    fstat(fd, &stat_buf);
+    const size_t num_hexes = stat_buf.st_size / sizeof(Hexahedron);
+    std::cout << "File " << argv[1] << "\n"
+              << "Size: " << stat_buf.st_size << "b\n"
+              << "Total # Hexas: " << num_hexes << "\n";
+    void *mapping = mmap(NULL, stat_buf.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    if (mapping == MAP_FAILED) {
+        std::cout << "Failed to map file\n";
+        perror("mapping file");
+        return 1;
+    }
+    const Hexahedron *hexes = static_cast<const Hexahedron *>(mapping);
 
-    const glm::uvec3 grid_dims = compute_grid(std::stoi(argv[1]));
     std::vector<RTCBuildPrimitive> boxes;
-    for (uint32_t k = 0; k < grid_dims.z; ++k) {
-        for (uint32_t j = 0; j < grid_dims.y; ++j) {
-            for (uint32_t i = 0; i < grid_dims.x; ++i) {
-                RTCBuildPrimitive prim;
-                prim.lower_x = i;
-                prim.lower_y = j;
-                prim.lower_z = k;
-                prim.upper_x = i + 1;
-                prim.upper_y = j + 1;
-                prim.upper_z = k + 1;
-                prim.geomID = (k * grid_dims.y + j) * grid_dims.x + i;
-                prim.primID = prim.geomID;
-                boxes.push_back(prim);
-            }
+    for (size_t i = 0; i < num_hexes; ++i) {
+        if (hexes[i].level == level) {
+            const int width = 1 << hexes[i].level;
+            RTCBuildPrimitive prim;
+            prim.lower_x = hexes[i].coord.x;
+            prim.lower_y = hexes[i].coord.y;
+            prim.lower_z = hexes[i].coord.z;
+            prim.upper_x = hexes[i].coord.x + width;
+            prim.upper_y = hexes[i].coord.y + width;
+            prim.upper_z = hexes[i].coord.z + width;
+            prim.geomID = 0;
+            prim.primID = i;
+            boxes.push_back(prim);
         }
     }
+    std::cout << "Level " << level << " contains " << boxes.size() << " hexas\n";
 
+    RTCDevice device = rtcNewDevice(nullptr);
     RTCBVH bvh = rtcNewBVH(device);
 
     // Can I use higher than max leaf prims? 32 voxels is not many
@@ -169,8 +195,8 @@ int main(int argc, char **argv)
     args.byteSize = sizeof(args);
     args.buildQuality = RTC_BUILD_QUALITY_HIGH;
     args.buildFlags = RTC_BUILD_FLAG_NONE;
-    args.minLeafSize = 500;
-    args.maxLeafSize = 5000;
+    args.minLeafSize = 10000000;
+    args.maxLeafSize = 50000000;
     args.maxBranchingFactor = 2;
     args.intersectionCost = 0.1f;
     args.bvh = bvh;
@@ -221,13 +247,15 @@ int main(int argc, char **argv)
                     glm::vec3(prim.upper_x, prim.upper_y, prim.upper_z));
             bounds.extend(b);
         }
+        /*
         std::cout << "Leaf[" << i << "] has " << leaves[i]->n_prims << " prims\n"
                   << "bounds: " << bounds << "\n";
+                  */
         leaf_bounds.push_back(bounds);
     }
 
-    bool had_overlap = false;
-    for (size_t i = 0; i < leaf_bounds.size() && !had_overlap; ++i) {
+    std::atomic<bool> had_overlap(false);
+    tbb::parallel_for(size_t(0), leaf_bounds.size(), [&](const size_t i) {
         for (size_t j = 0; j < leaf_bounds.size() && !had_overlap; ++j) {
             if (i == j) {
                 continue;
@@ -241,10 +269,13 @@ int main(int argc, char **argv)
                 had_overlap = true;
             }
         }
-    }
+    });
 
     rtcReleaseBVH(bvh);
     rtcReleaseDevice(device);
+
+    munmap(mapping, stat_buf.st_size);
+    close(fd);
 
     return 0;
 }
